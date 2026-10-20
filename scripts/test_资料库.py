@@ -2,8 +2,10 @@
 
 import base64
 import copy
+from contextlib import redirect_stdout
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -32,8 +34,16 @@ class KnowledgeBaseTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory(prefix="component-kb-test-")
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
+        self.policy = {
+            "架构版本": 1,
+            "分类": [
+                {"名称": "开关", "定义": "人工切换接点的开关", "边界": "不包含驱动板"},
+                {"名称": "连接器", "定义": "插头插座及壳体端子", "边界": "单件不代表套装"},
+            ],
+        }
+        self.put(kb.CATEGORY_RULES, self.policy)
         self.record = component()
-        self.put("元件/开关/测试.json", self.record)
+        self.put("元件/开关/test-switch-v1.json", self.record)
 
     def put(self, relative, value):
         target = self.root / relative
@@ -57,7 +67,7 @@ class KnowledgeBaseTests(unittest.TestCase):
         kb.atomic_index(self.root, index)
         changed = copy.deepcopy(self.record)
         changed["别名"].append("新增别名")
-        self.put("元件/开关/测试.json", changed)
+        self.put("元件/开关/test-switch-v1.json", changed)
         self.assertIn("索引缺失或过期", " ".join(kb.scan(self.root)[0]["错误"]))
 
     def test_cad_and_archive_rejected_even_if_ignored(self):
@@ -77,10 +87,10 @@ class KnowledgeBaseTests(unittest.TestCase):
         source = record["来源"][0]
         source["类型"] = "CAD获取地址"
         source["网址"] = "https://example.com/official-cad.rar"
-        self.put("元件/开关/测试.json", record)
+        self.put("元件/开关/test-switch-v1.json", record)
         self.assertTrue(self.inspect()["通过"])
         source["附件"] = {}
-        self.put("元件/开关/测试.json", record)
+        self.put("元件/开关/test-switch-v1.json", record)
         self.assertIn("CAD只能保存获取地址", " ".join(self.inspect()["错误"]))
 
     def test_large_image_and_text_rejected(self):
@@ -100,12 +110,12 @@ class KnowledgeBaseTests(unittest.TestCase):
         record = copy.deepcopy(self.record)
         record["来源"][0]["类型"] = "图纸"
         record["来源"][0]["附件"] = {"路径": "附件/测试.png", "字节数": len(payload), "SHA256": hashlib.sha256(payload).hexdigest(), "公开分发依据": "隔离测试生成图", "可读性已核对": True}
-        self.put("元件/开关/测试.json", record)
+        self.put("元件/开关/test-switch-v1.json", record)
         self.assertTrue(self.inspect()["通过"])
         record["来源"][0]["附件"]["SHA256"] = "0" * 64
         record["来源"][0]["附件"]["公开分发依据"] = ""
         record["来源"][0]["附件"]["可读性已核对"] = False
-        self.put("元件/开关/测试.json", record)
+        self.put("元件/开关/test-switch-v1.json", record)
         errors = " ".join(self.inspect()["错误"])
         for expected in ["SHA256不匹配", "公开分发依据", "可读性核对"]:
             self.assertIn(expected, errors)
@@ -113,16 +123,16 @@ class KnowledgeBaseTests(unittest.TestCase):
     def test_identity_duplicate_but_distinct_versions_allowed(self):
         record = copy.deepcopy(self.record)
         record["资料编号"] = "test-switch-other"
-        self.put("元件/开关/另一份.json", record)
+        self.put("元件/开关/test-switch-other.json", record)
         self.assertIn("品牌型号版本", " ".join(self.inspect()["错误"]))
         record["硬件版本"] = "V2"
-        self.put("元件/开关/另一份.json", record)
+        self.put("元件/开关/test-switch-other.json", record)
         self.assertTrue(self.inspect()["通过"])
 
     def test_unverified_search_requires_flag(self):
         record = copy.deepcopy(self.record)
         record["核对状态"] = "待核实"
-        self.put("元件/开关/测试.json", record)
+        self.put("元件/开关/test-switch-v1.json", record)
         _, _, records = kb.scan(self.root, check_index=False)
         self.assertEqual(kb.search(records, "MTS103"), [])
         self.assertEqual(len(kb.search(records, "MTS103", True)), 1)
@@ -132,7 +142,7 @@ class KnowledgeBaseTests(unittest.TestCase):
         record["核对依据"] = "本机路径 C:\\Private\\source.pdf"
         record["来源"][0]["网址"] = "https://example.com/file?access_token=example"
         record["限制"] = ["data:image/png;base64,ZXhhbXBsZQ=="]
-        self.put("元件/开关/测试.json", record)
+        self.put("元件/开关/test-switch-v1.json", record)
         errors = " ".join(self.inspect()["错误"])
         for expected in ["绝对路径", "令牌或签名", "二进制编码"]:
             self.assertIn(expected, errors)
@@ -148,7 +158,7 @@ class KnowledgeBaseTests(unittest.TestCase):
         self.put("本地/原件/模型.stp", b"ISO-10303-21;")
         report = self.inspect()
         self.assertTrue(report["通过"])
-        self.assertEqual(report["工作文件数"], 1)
+        self.assertEqual(report["工作文件数"], 2)
 
     def test_arbitrary_mesh_json_is_not_a_record(self):
         self.put("转换网格.json", {"vertices": [0, 0, 0], "faces": [0]})
@@ -177,15 +187,98 @@ class KnowledgeBaseTests(unittest.TestCase):
             kb.TOTAL_LIMIT = original
 
     def test_invalid_structure_produces_errors(self):
-        self.put("元件/开关/测试.json", ["并非元件对象"])
+        self.put("元件/开关/test-switch-v1.json", ["并非元件对象"])
         self.assertFalse(self.inspect()["通过"])
 
     def test_invalid_state_type_produces_errors(self):
         record = copy.deepcopy(self.record)
         record["核对状态"] = []
         record["来源"][0]["类型"] = {"错误": "对象"}
-        self.put("元件/开关/测试.json", record)
+        self.put("元件/开关/test-switch-v1.json", record)
         self.assertFalse(self.inspect()["通过"])
+
+    def test_unregistered_category_rejected(self):
+        record = copy.deepcopy(self.record)
+        record["分类"] = "开关类"
+        self.put("元件/开关类/test-switch-v1.json", record)
+        self.assertIn("分类未登记", " ".join(self.inspect()["错误"]))
+
+    def test_category_must_match_parent_directory(self):
+        self.put("元件/连接器/test-switch-v1.json", self.record)
+        self.assertIn("目录分类与记录分类不一致", " ".join(self.inspect()["错误"]))
+
+    def test_filename_must_match_record_id(self):
+        self.put("元件/开关/随意命名.json", self.record)
+        self.assertIn("文件名必须与资料编号一致", " ".join(self.inspect()["错误"]))
+
+    def test_record_depth_is_exactly_three(self):
+        for relative in ["元件/test-switch-v1.json", "元件/开关/版本/test-switch-v1.json"]:
+            with self.subTest(path=relative):
+                self.put(relative, self.record)
+                self.assertTrue(any(relative in item and "元件记录必须使用三层路径" in item for item in self.inspect()["错误"]))
+
+    def test_json_extension_must_be_lowercase(self):
+        record = copy.deepcopy(self.record)
+        record["资料编号"] = "test-uppercase-v1"
+        self.put("元件/开关/test-uppercase-v1.JSON", record)
+        self.assertIn("小写.json扩展名", " ".join(self.inspect()["错误"]))
+
+    def test_policy_missing_rejected_without_fallback(self):
+        (self.root / kb.CATEGORY_RULES).unlink()
+        report = self.inspect()
+        self.assertIn("分类规则缺失", " ".join(report["错误"]))
+        self.assertEqual(report["分类数"], 0)
+
+    def test_invalid_policy_json_rejected(self):
+        self.put(kb.CATEGORY_RULES, b"{")
+        self.assertIn("分类规则必须为有效", " ".join(self.inspect()["错误"]))
+
+    def test_empty_policy_rejected(self):
+        self.put(kb.CATEGORY_RULES, {"架构版本": 1, "分类": []})
+        self.assertIn("分类词表必须为非空数组", " ".join(self.inspect()["错误"]))
+
+    def test_duplicate_policy_categories_rejected(self):
+        policy = copy.deepcopy(self.policy)
+        policy["分类"].append(copy.deepcopy(policy["分类"][0]))
+        self.put(kb.CATEGORY_RULES, policy)
+        self.assertIn("分类名称重复", " ".join(self.inspect()["错误"]))
+
+    def test_category_definition_and_boundary_required(self):
+        for field in ["定义", "边界"]:
+            with self.subTest(field=field):
+                policy = copy.deepcopy(self.policy)
+                policy["分类"][0][field] = ""
+                self.put(kb.CATEGORY_RULES, policy)
+                self.assertIn("缺少有效字段：" + field, " ".join(self.inspect()["错误"]))
+
+    def test_category_name_cannot_be_a_path(self):
+        for name in ["../开关", "开关/其他", "开关\\其他", " 开关", "开关."]:
+            with self.subTest(name=name):
+                policy = copy.deepcopy(self.policy)
+                policy["分类"][0]["名称"] = name
+                self.put(kb.CATEGORY_RULES, policy)
+                self.assertIn("分类名称必须能作为单层目录名称", " ".join(self.inspect()["错误"]))
+
+    def test_new_registered_category_allowed(self):
+        policy = copy.deepcopy(self.policy)
+        policy["分类"].append({"名称": "电机", "定义": "电机本体", "边界": "不包含电机驱动板"})
+        self.put(kb.CATEGORY_RULES, policy)
+        record = copy.deepcopy(self.record)
+        record.update({"资料编号": "test-motor-v1", "名称": "测试电机", "型号": "MOTOR1", "分类": "电机"})
+        self.put("元件/电机/test-motor-v1.json", record)
+        report = self.inspect()
+        self.assertTrue(report["通过"], report)
+        self.assertEqual(report["分类数"], 3)
+
+    def test_invalid_path_does_not_replace_index(self):
+        _, index, _ = kb.scan(self.root, check_index=False)
+        kb.atomic_index(self.root, index)
+        previous = (self.root / kb.INDEX).read_bytes()
+        self.put("元件/连接器/test-switch-v1.json", self.record)
+        with redirect_stdout(io.StringIO()):
+            result = kb.main(["--root", str(self.root), "index", "--write"])
+        self.assertEqual(result, 1)
+        self.assertEqual((self.root / kb.INDEX).read_bytes(), previous)
 
 
 if __name__ == "__main__":

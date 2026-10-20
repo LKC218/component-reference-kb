@@ -34,6 +34,7 @@ BLOCKED = {
 }
 SKIP = {".git", "本地", ".local", ".venv", "venv", "__pycache__"}
 INDEX = Path("索引/资料索引.json")
+CATEGORY_RULES = Path("docs/分类规则.json")
 COMPONENT_FIELDS = {
     "架构版本", "资料编号", "名称", "品牌", "型号", "硬件版本", "分类",
     "别名", "关联课程", "核对状态", "核对日期", "核对依据", "核对范围",
@@ -173,6 +174,59 @@ def nonempty(obj, fields):
     return [f"缺少有效字段：{key}" for key in fields if not isinstance(obj.get(key), str) or not obj[key].strip() or "待填写" in obj[key]]
 
 
+def load_categories(root):
+    """分类只从仓库词表读取，缺失或无效时返回错误，不使用默认值。"""
+    target = root / CATEGORY_RULES
+    if not target.is_file() or target.is_symlink() or not target.resolve().is_relative_to(root):
+        return {}, ["分类规则缺失或不是仓库内的普通文件"]
+    if target.stat().st_size > TEXT_LIMIT:
+        return {}, ["分类规则文件超过文本体积上限"]
+    try:
+        policy = json.loads(target.read_text(encoding="utf-8-sig"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return {}, ["分类规则必须为有效的UTF-8 JSON"]
+    if not isinstance(policy, dict) or set(policy) != {"架构版本", "分类"} or type(policy.get("架构版本")) is not int or policy["架构版本"] != VERSION:
+        return {}, ["分类规则字段或架构版本无效"]
+    entries = policy["分类"]
+    if not isinstance(entries, list) or not entries:
+        return {}, ["分类词表必须为非空数组"]
+    categories, names, errors = {}, set(), []
+    for index, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict) or set(entry) != {"名称", "定义", "边界"}:
+            errors.append(f"分类{index}必须包含名称、定义、边界")
+            continue
+        issues = nonempty(entry, ["名称", "定义", "边界"])
+        name = entry["名称"]
+        if isinstance(name, str) and (name != name.strip() or name.rstrip(". ") != name or name in {".", ".."} or re.search(r'[\\/<>:"|?*\x00-\x1f]', name)):
+            issues.append("分类名称必须能作为单层目录名称，不能含路径或首尾空白")
+        errors.extend(f"分类{index}：{item}" for item in issues)
+        if issues:
+            continue
+        key = normalize(name)
+        if key in names:
+            errors.append(f"分类{index}：分类名称重复")
+        names.add(key)
+        categories[name] = entry
+    return ({} if errors else categories), errors
+
+
+def component_path_errors(relative, record, categories):
+    if not isinstance(record, dict):
+        return []
+    errors = []
+    category, identifier = record.get("分类"), record.get("资料编号")
+    if isinstance(category, str) and category not in categories:
+        errors.append("分类未登记，请先核对分类规则词表")
+    parts = PurePosixPath(relative).parts
+    if len(parts) != 3:
+        return errors + ["元件记录必须使用三层路径：元件/分类/资料编号.json"]
+    if isinstance(category, str) and parts[1] != category:
+        errors.append("目录分类与记录分类不一致")
+    if isinstance(identifier, str) and parts[2] != identifier + ".json":
+        errors.append("文件名必须与资料编号一致，并使用小写.json扩展名")
+    return errors
+
+
 def string_list(obj, key, require_items=False):
     value = obj.get(key)
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value) or (require_items and not value):
@@ -296,6 +350,8 @@ def website_errors(record):
 def scan(root, check_index=True):
     root = root.resolve()
     errors, warnings, records, websites = [], [], [], []
+    categories, category_errors = load_categories(root)
+    errors.extend(f"{CATEGORY_RULES.as_posix()}：{item}" for item in category_errors)
     references, assets, identities, identifiers, site_urls = set(), {}, {}, {}, set()
     total, count = 0, 0
     for path, issue in sorted(walk_files(root), key=lambda item: item[0].as_posix()):
@@ -352,6 +408,7 @@ def scan(root, check_index=True):
             errors.extend(f"{relative}：{item}" for item in private_errors(record))
             if relative.startswith("元件/"):
                 issues = component_errors(record, root, references)
+                issues.extend(component_path_errors(relative, record, categories))
                 errors.extend(f"{relative}：{item}" for item in issues)
                 if not issues:
                     identity = tuple(normalize(record[key]) for key in ["品牌", "型号", "硬件版本"])
@@ -371,8 +428,8 @@ def scan(root, check_index=True):
                         errors.append(f"{relative}：网站入口重复")
                     site_urls.add(key)
                     websites.append((relative, record))
-            elif relative != INDEX.as_posix() and not relative.startswith("模板/"):
-                errors.append(f"{relative}：JSON应放在元件、网站或模板目录，禁止存放转换网格")
+            elif relative not in {INDEX.as_posix(), CATEGORY_RULES.as_posix()} and not relative.startswith("模板/"):
+                errors.append(f"{relative}：JSON应放在元件、网站、模板或指定分类规则路径，禁止存放转换网格")
     for relative in assets.values():
         if relative not in references:
             errors.append(f"{relative}：附件没有对应来源和公开分发依据")
@@ -388,7 +445,7 @@ def scan(root, check_index=True):
         target = root / INDEX
         if not target.is_file() or target.read_bytes() != encode(index):
             errors.append("索引缺失或过期，请运行 index --write")
-    report = {"通过": not errors, "工作文件数": count, "工作文件字节数": total, "元件记录数": len(records), "网站记录数": len(websites), "附件数": len(assets), "Git历史": history, "错误": errors, "提示": warnings}
+    report = {"通过": not errors, "工作文件数": count, "工作文件字节数": total, "分类数": len(categories), "元件记录数": len(records), "网站记录数": len(websites), "附件数": len(assets), "Git历史": history, "错误": errors, "提示": warnings}
     return report, index, records
 
 
