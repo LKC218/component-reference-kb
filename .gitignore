@@ -1,0 +1,36 @@
+# 机器配置、原始下载、会话候选和检查报告留在本地。
+/本地/
+/.local/
+.env
+.env.*
+*.local.json
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+# CAD、模型和压缩包不得入库；检查工具仍会发现正式目录中的这些文件。
+*.[sS][tT][pP]
+*.[sS][tT][eE][pP]
+*.iges
+*.igs
+*.3dm
+*.dwg
+*.dxf
+*.sldprt
+*.sldasm
+*.f3d
+*.stl
+*.obj
+*.fbx
+*.gltf
+*.glb
+*.blend
+*.blend1
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
