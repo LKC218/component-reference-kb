@@ -227,6 +227,21 @@ def component_path_errors(relative, record, categories):
     return errors
 
 
+def website_path_errors(relative, record):
+    if not isinstance(record, dict):
+        return []
+    errors = []
+    name = record.get("名称")
+    if isinstance(name, str) and (name != name.strip() or name.rstrip(". ") != name or name in {".", ".."} or re.search(r'[\\/<>:"|?*\x00-\x1f]', name)):
+        errors.append("网站名称必须能作为单层文件名，不能含路径或首尾空白")
+    parts = PurePosixPath(relative).parts
+    if len(parts) != 2:
+        return errors + ["网站记录必须使用两层路径：网站/名称.json"]
+    if isinstance(name, str) and parts[1] != name + ".json":
+        errors.append("文件名必须与网站名称一致，并使用小写.json扩展名")
+    return errors
+
+
 def string_list(obj, key, require_items=False):
     value = obj.get(key)
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value) or (require_items and not value):
@@ -421,6 +436,7 @@ def scan(root, check_index=True):
                     records.append((relative, record))
             elif relative.startswith("网站/"):
                 issues = website_errors(record)
+                issues.extend(website_path_errors(relative, record))
                 errors.extend(f"{relative}：{item}" for item in issues)
                 if not issues:
                     key = canonical_url(record["网址"])

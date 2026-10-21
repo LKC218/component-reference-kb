@@ -29,6 +29,15 @@ def component():
     }
 
 
+def website():
+    return {
+        "架构版本": 1, "名称": "测试资料站", "网址": "https://example.com/",
+        "适用资料类型": ["元件网站"], "搜索建议": "按完整型号搜索",
+        "访问说明": "隔离测试入口", "核对日期": "2026-10-20",
+        "核对方式": "本地资料回收",
+    }
+
+
 class KnowledgeBaseTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory(prefix="component-kb-test-")
@@ -69,6 +78,33 @@ class KnowledgeBaseTests(unittest.TestCase):
         changed["别名"].append("新增别名")
         self.put("元件/开关/test-switch-v1.json", changed)
         self.assertIn("索引缺失或过期", " ".join(kb.scan(self.root)[0]["错误"]))
+
+    def test_valid_website_record_and_index(self):
+        self.put("网站/测试资料站.json", website())
+        report, index, _ = kb.scan(self.root, check_index=False)
+        self.assertTrue(report["通过"], report)
+        self.assertEqual(report["网站记录数"], 1)
+        self.assertEqual(index["网站"][0]["记录路径"], "网站/测试资料站.json")
+        kb.atomic_index(self.root, index)
+        self.assertTrue(kb.scan(self.root)[0]["通过"])
+
+    def test_website_filename_must_match_name(self):
+        self.put("网站/其他名称.json", website())
+        self.assertIn("文件名必须与网站名称一致", " ".join(self.inspect()["错误"]))
+
+    def test_website_path_must_be_two_levels(self):
+        self.put("网站/子目录/测试资料站.json", website())
+        self.assertIn("网站记录必须使用两层路径", " ".join(self.inspect()["错误"]))
+
+    def test_website_name_cannot_be_a_path(self):
+        site = website()
+        site["名称"] = "../测试资料站"
+        self.put("网站/测试资料站.json", site)
+        self.assertIn("网站名称必须能作为单层文件名", " ".join(self.inspect()["错误"]))
+
+    def test_website_json_extension_must_be_lowercase(self):
+        self.put("网站/测试资料站.JSON", website())
+        self.assertIn("小写.json扩展名", " ".join(self.inspect()["错误"]))
 
     def test_cad_and_archive_rejected_even_if_ignored(self):
         self.put(".gitignore", b"*.STEP\n*.zip\n")
